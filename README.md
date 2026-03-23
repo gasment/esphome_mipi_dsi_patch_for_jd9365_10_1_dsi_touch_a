@@ -1,5 +1,6 @@
 # esphome_mipi_dsi_patch_for_jd9365_10_1_dsi_touch_a
 A ESPHome MIPI-DSI Component Patch For WAVESHARE-10.1-DSI-TOUCH-A
+* 全部代码修改由Chat-AI提供
 * 基于ESPHome 2026.3.0 修改，用于修复特定型号MIPI-DSI屏幕的启动和初始化问题。
 * 仅针对ESP32-P4连接屏幕型号：WAVESHARE-10.1-DSI-TOUCH-A / jd9365_10_1_dsi_touch_a（https://www.waveshare.net/wiki/10.1-DSI-TOUCH-A）
 其他型号不要使用。
