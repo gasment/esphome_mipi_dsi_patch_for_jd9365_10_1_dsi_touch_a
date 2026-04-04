@@ -72,3 +72,5 @@ A ESPHome MIPI-DSI Component Patch For WAVESHARE-10.1-DSI-TOUCH-A
   [C][component:252]: Setup display took 3117ms
   [D][gt911.touchscreen:062]: Switches ADDR: 0x5D DATA: 0x35
   ```
+* 额外：
+  * 修改为双缓冲（Double Framebuffer）和 Cache Sync屏幕刷新机制，规避一些animation组件导致的全屏刷脏与全屏闪烁问题
