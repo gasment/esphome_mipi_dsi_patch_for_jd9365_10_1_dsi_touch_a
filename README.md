@@ -74,6 +74,7 @@ A ESPHome MIPI-DSI Component Patch For WAVESHARE-10.1-DSI-TOUCH-A
   ```
 * 额外：
   * 修改为双缓冲（Double Framebuffer）和 Cache Sync屏幕刷新机制，规避一些animation组件导致的全屏刷脏与全屏闪烁问题
+  * 双buffer将导致PSRAM使用量增加2MB左右
   * 效果检查：(fb1 和 fb2 地址不同且非零)
   ```
   [W][display.mipi_dsi:116]: DPI panel: num_fbs=2, fb1=0x482bb200 fb2=0x484af240
