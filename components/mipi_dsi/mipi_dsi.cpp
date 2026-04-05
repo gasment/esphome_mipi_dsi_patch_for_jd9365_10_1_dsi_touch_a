@@ -1,8 +1,10 @@
 #ifdef USE_ESP32_VARIANT_ESP32P4
 #include <utility>
+#include <cstring>
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
 #include "esphome/components/i2c/i2c.h"   //Patched
+#include <climits>
 namespace esphome {
 namespace mipi_dsi {
 
@@ -20,6 +22,284 @@ void MIPI_DSI::smark_failed(const LogString *message, esp_err_t err) {
   ESP_LOGE(TAG, "%s: %s", LOG_STR_ARG(message), esp_err_to_name(err));
   this->mark_failed(message);
 }
+
+/////////////////////////////////////////////////patch
+void MIPI_DSI::reset_dirty_window_() {
+  this->x_low_ = this->width_;
+  this->y_low_ = this->height_;
+  this->x_high_ = 0;
+  this->y_high_ = 0;
+}
+
+void MIPI_DSI::reset_pending_dirty_() {
+  this->pending_rect_count_ = 0;
+}
+
+void MIPI_DSI::reset_inflight_dirty_() {
+  this->inflight_rect_count_ = 0;
+}
+
+bool MIPI_DSI::has_pending_dirty_() const {
+  return this->pending_rect_count_ > 0;
+}
+
+bool MIPI_DSI::rects_touch_or_overlap_(const DirtyRect &a, const DirtyRect &b) {
+  return !((static_cast<uint32_t>(a.x2) + 1U < b.x1) ||
+           (static_cast<uint32_t>(b.x2) + 1U < a.x1) ||
+           (static_cast<uint32_t>(a.y2) + 1U < b.y1) ||
+           (static_cast<uint32_t>(b.y2) + 1U < a.y1));
+}
+
+MIPI_DSI::DirtyRect MIPI_DSI::union_rect_(const DirtyRect &a, const DirtyRect &b) {
+  DirtyRect out;
+  out.x1 = (a.x1 < b.x1) ? a.x1 : b.x1;
+  out.y1 = (a.y1 < b.y1) ? a.y1 : b.y1;
+  out.x2 = (a.x2 > b.x2) ? a.x2 : b.x2;
+  out.y2 = (a.y2 > b.y2) ? a.y2 : b.y2;
+  return out;
+}
+
+uint32_t MIPI_DSI::rect_area_(const DirtyRect &r) {
+  return static_cast<uint32_t>(r.x2 - r.x1 + 1U) * static_cast<uint32_t>(r.y2 - r.y1 + 1U);
+}
+
+void MIPI_DSI::merge_rect_into_list_(DirtyRect *rects, uint8_t &count, const DirtyRect &input) {
+  if (input.x1 > input.x2 || input.y1 > input.y2)
+    return;
+
+  DirtyRect merged = input;
+
+  // 先把所有重叠/相邻 rect 吃进去
+  bool merged_any = false;
+  do {
+    merged_any = false;
+    for (uint8_t i = 0; i < count; i++) {
+      if (!this->rects_touch_or_overlap_(rects[i], merged))
+        continue;
+
+      merged = this->union_rect_(rects[i], merged);
+
+      for (uint8_t j = i + 1; j < count; j++) {
+        rects[j - 1] = rects[j];
+      }
+      count--;
+      merged_any = true;
+      break;
+    }
+  } while (merged_any);
+
+  if (count < MAX_DIRTY_RECTS) {
+    rects[count++] = merged;
+    return;
+  }
+
+  // 满了：选一个“扩张代价最小”的 rect 强制合并
+  uint8_t best_index = 0;
+  uint32_t best_cost = UINT32_MAX;
+
+  for (uint8_t i = 0; i < count; i++) {
+    DirtyRect u = this->union_rect_(rects[i], merged);
+    uint32_t cost = this->rect_area_(u) - this->rect_area_(rects[i]);
+    if (cost < best_cost) {
+      best_cost = cost;
+      best_index = i;
+    }
+  }
+
+  rects[best_index] = this->union_rect_(rects[best_index], merged);
+
+  // 强制合并后，可能又和其他 rect 接壤，再做一轮压缩
+  bool collapsed = false;
+  do {
+    collapsed = false;
+    for (uint8_t i = 0; i < count; i++) {
+      for (uint8_t j = i + 1; j < count; j++) {
+        if (!this->rects_touch_or_overlap_(rects[i], rects[j]))
+          continue;
+
+        rects[i] = this->union_rect_(rects[i], rects[j]);
+        for (uint8_t k = j + 1; k < count; k++) {
+          rects[k - 1] = rects[k];
+        }
+        count--;
+        collapsed = true;
+        break;
+      }
+      if (collapsed)
+        break;
+    }
+  } while (collapsed);
+}
+
+void MIPI_DSI::merge_pending_dirty_(int x1, int y1, int x2, int y2) {
+  if (x1 > x2 || y1 > y2)
+    return;
+
+  if (x1 < 0)
+    x1 = 0;
+  if (y1 < 0)
+    y1 = 0;
+  if (x2 >= this->width_)
+    x2 = this->width_ - 1;
+  if (y2 >= this->height_)
+    y2 = this->height_ - 1;
+
+  if (x1 > x2 || y1 > y2)
+    return;
+
+  DirtyRect rect;
+  rect.x1 = static_cast<uint16_t>(x1);
+  rect.y1 = static_cast<uint16_t>(y1);
+  rect.x2 = static_cast<uint16_t>(x2);
+  rect.y2 = static_cast<uint16_t>(y2);
+
+  this->merge_rect_into_list_(this->pending_rects_, this->pending_rect_count_, rect);
+}
+
+void MIPI_DSI::merge_rects_into_pending_(const DirtyRect *rects, uint8_t count) {
+  for (uint8_t i = 0; i < count; i++) {
+    this->merge_rect_into_list_(this->pending_rects_, this->pending_rect_count_, rects[i]);
+  }
+}
+
+
+
+
+
+void MIPI_DSI::copy_rect_to_buffer_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset,
+                                    int y_offset, int x_pad) {
+  if (w <= 0 || h <= 0)
+    return;
+  if (!this->check_buffer_())
+    return;
+
+  const size_t bytes_per_pixel = 3 - this->color_depth_;
+  const size_t src_stride = static_cast<size_t>(x_offset + w + x_pad) * bytes_per_pixel;
+  const uint8_t *src =
+      ptr + static_cast<size_t>(y_offset) * src_stride + static_cast<size_t>(x_offset) * bytes_per_pixel;
+
+  const size_t dst_stride = this->width_ * bytes_per_pixel;
+  uint8_t *dst =
+      this->buffer_ + (static_cast<size_t>(y_start) * this->width_ + static_cast<size_t>(x_start)) * bytes_per_pixel;
+
+  const size_t copy_bytes = static_cast<size_t>(w) * bytes_per_pixel;
+
+  for (int y = 0; y < h; y++) {
+    memcpy(dst, src, copy_bytes);
+    dst += dst_stride;
+    src += src_stride;
+  }
+
+  this->merge_pending_dirty_(x_start, y_start, x_start + w - 1, y_start + h - 1);
+}
+
+
+bool MIPI_DSI::start_present_() {
+  if (!this->check_buffer_())
+    return false;
+
+  if (!this->use_panel_double_fb_ || this->panel_fbs_[0] == nullptr || this->panel_fbs_[1] == nullptr) {
+    ESP_LOGE(TAG, "Internal DPI framebuffers are not available");
+    return false;
+  }
+
+  if (this->present_in_progress_)
+    return false;
+
+  if (!this->has_pending_dirty_())
+    return true;
+
+  const uint8_t next_fb = this->active_panel_fb_ ^ 1;
+
+  this->copy_dirty_rects_to_panel_fb_(next_fb, this->pending_rects_, this->pending_rect_count_);
+
+  // 清掉上一次可能残留的完成信号
+  xSemaphoreTake(this->io_lock_, 0);
+
+  esp_err_t err =
+      esp_lcd_panel_draw_bitmap(this->handle_, 0, 0, this->width_, this->height_, this->panel_fbs_[next_fb]);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "esp_lcd_panel_draw_bitmap(flip) failed: %s", esp_err_to_name(err));
+    return false;
+  }
+
+  this->inflight_rect_count_ = this->pending_rect_count_;
+  for (uint8_t i = 0; i < this->pending_rect_count_; i++) {
+    this->inflight_rects_[i] = this->pending_rects_[i];
+  }
+  this->reset_pending_dirty_();
+
+  this->queued_panel_fb_ = next_fb;
+  this->present_in_progress_ = true;
+  return true;
+}
+
+
+
+void MIPI_DSI::service_present_queue_() {
+  if (this->io_lock_ != nullptr && xSemaphoreTake(this->io_lock_, 0) == pdTRUE) {
+    this->present_in_progress_ = false;
+    this->active_panel_fb_ = this->queued_panel_fb_;
+
+    if (this->inflight_rect_count_ > 0) {
+      if (this->has_pending_dirty_()) {
+        // 已经有新 dirty 了，不必先回填 inactive fb；
+        // 直接把上一帧 rect 列表合并进 pending，下一次 present 一次性拷贝
+        this->merge_rects_into_pending_(this->inflight_rects_, this->inflight_rect_count_);
+      } else {
+        // 没有新 dirty，才把上一帧 rect 列表镜像回另一块 fb，保持双 fb 同步
+        const uint8_t inactive_fb = this->active_panel_fb_ ^ 1;
+        this->copy_dirty_rects_to_panel_fb_(inactive_fb, this->inflight_rects_, this->inflight_rect_count_);
+      }
+    }
+
+    this->reset_inflight_dirty_();
+  }
+
+  if (!this->present_in_progress_ && this->present_pending_) {
+    this->present_pending_ = false;
+    if (!this->start_present_()) {
+      this->present_pending_ = true;
+    }
+  }
+}
+
+
+
+
+
+
+void MIPI_DSI::copy_dirty_rect_to_panel_fb_(uint8_t fb_index, int x1, int y1, int x2, int y2) {
+  if (fb_index > 1 || this->panel_fbs_[fb_index] == nullptr)
+    return;
+  if (x1 > x2 || y1 > y2)
+    return;
+
+  const size_t bpp = 3 - this->color_depth_;
+  const size_t width = x2 - x1 + 1;
+  const size_t height = y2 - y1 + 1;
+  const size_t copy_bytes = width * bpp;
+  const size_t stride = this->width_ * bpp;
+
+  const uint8_t *src =
+      this->buffer_ + (static_cast<size_t>(y1) * this->width_ + static_cast<size_t>(x1)) * bpp;
+  uint8_t *dst =
+      this->panel_fbs_[fb_index] + (static_cast<size_t>(y1) * this->width_ + static_cast<size_t>(x1)) * bpp;
+
+  for (size_t row = 0; row < height; row++) {
+    memcpy(dst, src, copy_bytes);
+    src += stride;
+    dst += stride;
+  }
+}
+void MIPI_DSI::copy_dirty_rects_to_panel_fb_(uint8_t fb_index, const DirtyRect *rects, uint8_t count) {
+  for (uint8_t i = 0; i < count; i++) {
+    this->copy_dirty_rect_to_panel_fb_(fb_index, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
+  }
+}
+/////////////////////////////////////////////////patch
+
+
 
 void MIPI_DSI::setup() {
   ESP_LOGCONFIG(TAG, "Running Setup - with I2C Power Init");
@@ -86,7 +366,7 @@ void MIPI_DSI::setup() {
                                            .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
                                            .dpi_clock_freq_mhz = this->pclk_frequency_,
                                            .pixel_format = pixel_format,
-                                           .num_fbs = 1,  // number of frame buffers to allocate
+                                           .num_fbs = 2,  // number of frame buffers to allocate
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -164,12 +444,41 @@ void MIPI_DSI::setup() {
         delay(10);
     }
   }
+
+
+
   this->io_lock_ = xSemaphoreCreateBinary();
+  this->frame_buffer_size_ = static_cast<size_t>(this->width_) * this->height_ * (3 - this->color_depth_);
+  this->queued_panel_fb_ = 0;
+  this->present_in_progress_ = false;
+  this->present_pending_ = false;
+  this->reset_dirty_window_();
+  this->reset_pending_dirty_();
+  this->reset_inflight_dirty_();
+
+
+  void *fb0 = nullptr;
+  void *fb1 = nullptr;
+  err = esp_lcd_dpi_panel_get_frame_buffer(this->handle_, 2, &fb0, &fb1);
+  if (err != ESP_OK || fb0 == nullptr || fb1 == nullptr) {
+    this->smark_failed(LOG_STR("esp_lcd_dpi_panel_get_frame_buffer failed"), err == ESP_OK ? ESP_FAIL : err);
+    return;
+  }
+
+  this->panel_fbs_[0] = static_cast<uint8_t *>(fb0);
+  this->panel_fbs_[1] = static_cast<uint8_t *>(fb1);
+  this->use_panel_double_fb_ = true;
+  this->active_panel_fb_ = 0;
+  this->queued_panel_fb_ = 0;
+
+  memset(this->panel_fbs_[0], 0, this->frame_buffer_size_);
+  memset(this->panel_fbs_[1], 0, this->frame_buffer_size_);
+
   esp_lcd_dpi_panel_event_callbacks_t cbs = {
-      .on_color_trans_done = notify_refresh_ready,
+      .on_refresh_done = notify_refresh_ready,
   };
 
-  err = (esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this->io_lock_));
+  err = esp_lcd_dpi_panel_register_event_callbacks(this->handle_, &cbs, this->io_lock_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("Failed to register callbacks"), err);
     return;
@@ -177,6 +486,11 @@ void MIPI_DSI::setup() {
 
   ESP_LOGCONFIG(TAG, "MIPI DSI setup complete");
 }
+
+void MIPI_DSI::loop() {
+  this->service_present_queue_();
+}
+
 
 void MIPI_DSI::update() {
   if (this->auto_clear_enabled_) {
@@ -191,19 +505,16 @@ void MIPI_DSI::update() {
   } else {
     this->stop_poller();
   }
+
   if (this->buffer_ == nullptr || this->x_low_ > this->x_high_ || this->y_low_ > this->y_high_)
     return;
-  ESP_LOGV(TAG, "x_low %d, y_low %d, x_high %d, y_high %d", this->x_low_, this->y_low_, this->x_high_, this->y_high_);
-  int w = this->x_high_ - this->x_low_ + 1;
-  int h = this->y_high_ - this->y_low_ + 1;
-  this->write_to_display_(this->x_low_, this->y_low_, w, h, this->buffer_, this->x_low_, this->y_low_,
-                          this->width_ - w - this->x_low_);
-  // invalidate watermarks
-  this->x_low_ = this->width_;
-  this->y_low_ = this->height_;
-  this->x_high_ = 0;
-  this->y_high_ = 0;
+
+  this->merge_pending_dirty_(this->x_low_, this->y_low_, this->x_high_, this->y_high_);
+  this->present_pending_ = true;
+  //this->service_present_queue_();
+  this->reset_dirty_window_();
 }
+
 
 void MIPI_DSI::draw_pixels_at(int x_start, int y_start, int w, int h, const uint8_t *ptr, display::ColorOrder order,
                               display::ColorBitness bitness, bool big_endian, int x_offset, int y_offset, int x_pad) {
@@ -219,37 +530,33 @@ void MIPI_DSI::draw_pixels_at(int x_start, int y_start, int w, int h, const uint
   this->write_to_display_(x_start, y_start, w, h, ptr, x_offset, y_offset, x_pad);
 }
 
+
+
+
 void MIPI_DSI::write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset, int y_offset,
                                  int x_pad) {
-  esp_err_t err = ESP_OK;
-  auto bytes_per_pixel = 3 - this->color_depth_;
-  auto stride = (x_offset + w + x_pad) * bytes_per_pixel;
-  ptr += y_offset * stride + x_offset * bytes_per_pixel;  // skip to the first pixel
-  // x_ and y_offset are offsets into the source buffer, unrelated to our own offsets into the display.
-  if (x_offset == 0 && x_pad == 0) {
-    err = esp_lcd_panel_draw_bitmap(this->handle_, x_start, y_start, x_start + w, y_start + h, ptr);
-    xSemaphoreTake(this->io_lock_, portMAX_DELAY);
+  if (w <= 0 || h <= 0)
+    return;
 
+  if (ptr != this->buffer_) {
+    this->copy_rect_to_buffer_(x_start, y_start, w, h, ptr, x_offset, y_offset, x_pad);
   } else {
-    // draw line by line
-    for (int y = 0; y != h; y++) {
-      err = esp_lcd_panel_draw_bitmap(this->handle_, x_start, y + y_start, x_start + w, y + y_start + 1, ptr);
-      if (err != ESP_OK)
-        break;
-      ptr += stride;  // next line
-      xSemaphoreTake(this->io_lock_, portMAX_DELAY);
-    }
+    this->merge_pending_dirty_(x_start, y_start, x_start + w - 1, y_start + h - 1);
   }
-  if (err != ESP_OK)
-    ESP_LOGE(TAG, "lcd_lcd_panel_draw_bitmap failed: %s", esp_err_to_name(err));
+
+  this->present_pending_ = true;
 }
+
+
+
+
 
 bool MIPI_DSI::check_buffer_() {
   if (this->is_failed())
     return false;
   if (this->buffer_ != nullptr)
     return true;
-  // this is dependent on the enum values.
+
   auto bytes_per_pixel = 3 - this->color_depth_;
   RAMAllocator<uint8_t> allocator;
   this->buffer_ = allocator.allocate(this->height_ * this->width_ * bytes_per_pixel);
@@ -257,8 +564,14 @@ bool MIPI_DSI::check_buffer_() {
     this->mark_failed(LOG_STR("Could not allocate buffer for display!"));
     return false;
   }
+
+  memset(this->buffer_, 0, this->height_ * this->width_ * bytes_per_pixel);
+  this->reset_dirty_window_();
+  this->reset_pending_dirty_();
+  this->reset_inflight_dirty_();
   return true;
 }
+
 
 void MIPI_DSI::draw_pixel_at(int x, int y, Color color) {
   if (!this->get_clipping().inside(x, y))
@@ -283,7 +596,6 @@ void MIPI_DSI::draw_pixel_at(int x, int y, Color color) {
   if (x >= this->get_width_internal() || x < 0 || y >= this->get_height_internal() || y < 0) {
     return;
   }
-  auto pixel = convert_big_endian(display::ColorUtil::color_to_565(color));
   if (!this->check_buffer_())
     return;
   size_t pos = (y * this->width_) + x;
@@ -360,6 +672,10 @@ void MIPI_DSI::fill(Color color) {
     default:
       break;
   }
+  this->x_low_ = 0;
+  this->y_low_ = 0;
+  this->x_high_ = this->width_ - 1;
+  this->y_high_ = this->height_ - 1;
 }
 
 int MIPI_DSI::get_width() {
