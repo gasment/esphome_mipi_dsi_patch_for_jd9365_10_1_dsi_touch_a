@@ -73,3 +73,27 @@ A ESPHome MIPI-DSI Component Patch For WAVESHARE-10.1-DSI-TOUCH-A
   [D][gt911.touchscreen:062]: Switches ADDR: 0x5D DATA: 0x35
   ```
 
+PS:
+dev分支版本，在main分支基础上,添加了双重缓冲和防大脏区刷新撕裂功能（类vsync）
+,切换到dev分支：
+```
+external_components:
+  - source:
+      type: git
+      url: https://github.com/gasment/esphome_mipi_dsi_patch_for_jd9365_10_1_dsi_touch_a
+      ref: dev
+    components: [ mipi_dsi ]
+    refresh: always
+```
+代价：
+* PSRAM占用上升4MB左右
+* CPU在存在动态组件如animate apng、gif的页面时，占用上升10%左右
+* UI响应可能会有少许变慢，可加大L2_cache来缓解
+  ```
+  esp32:
+  variant: esp32p4
+  framework:
+    type: esp-idf
+      CONFIG_CACHE_L2_CACHE_256KB: "y"
+      CONFIG_CACHE_L2_CACHE_LINE_64B: "y"
+  ```
