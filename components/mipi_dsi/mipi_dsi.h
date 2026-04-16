@@ -16,7 +16,7 @@
 
 #include "esp_lcd_mipi_dsi.h"
 
-#include "esphome/components/i2c/i2c.h"   //Patched
+#include "esphome/components/i2c/i2c.h"  // Patched
 
 namespace esphome {
 namespace mipi_dsi {
@@ -62,7 +62,7 @@ class MIPI_DSI : public display::Display {
   void set_model(const char *model) { this->model_ = model; }
   void set_lane_bit_rate(float lane_bit_rate) { this->lane_bit_rate_ = lane_bit_rate; }
   void set_lanes(uint8_t lanes) { this->lanes_ = lanes; }
-  void set_madctl(uint8_t madctl) { this->madctl_ = madctl; }
+  void set_madctl(uint8_t madctl) { this->madctl_ = madctl; }  // Patched
 
   void smark_failed(const LogString *message, esp_err_t err);
 
@@ -79,9 +79,8 @@ class MIPI_DSI : public display::Display {
   int get_height() override;
 
   void dump_config() override;
-  
-  void set_power_i2c_bus(i2c::I2CBus *bus) { this->power_i2c_bus_ = bus; }  //Patched
 
+  void set_power_i2c_bus(i2c::I2CBus *bus) { this->power_i2c_bus_ = bus; }  // Patched
 
  protected:
   void write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset, int y_offset,
@@ -91,7 +90,7 @@ class MIPI_DSI : public display::Display {
   std::vector<GPIOPin *> enable_pins_{};
   size_t width_{};
   size_t height_{};
-  uint8_t madctl_{};
+  uint8_t madctl_{};  // Patched
   uint16_t hsync_pulse_width_ = 10;
   uint16_t hsync_back_porch_ = 10;
   uint16_t hsync_front_porch_ = 20;
@@ -118,7 +117,7 @@ class MIPI_DSI : public display::Display {
   uint16_t y_low_{1};
   uint16_t x_high_{0};
   uint16_t y_high_{0};
-  i2c::I2CBus *power_i2c_bus_{nullptr};  //Patched
+  i2c::I2CBus *power_i2c_bus_{nullptr};  // Patched
 };
 
 }  // namespace mipi_dsi
