@@ -4,7 +4,7 @@ import pkgutil
 
 from esphome import pins
 import esphome.codegen as cg
-from esphome.components import display, i2c   #//Patched
+from esphome.components import display, i2c  # Patched: added i2c
 from esphome.components.const import (
     BYTE_ORDER_BIG,
     BYTE_ORDER_LITTLE,
@@ -70,7 +70,8 @@ ColorBitness = display.display_ns.enum("ColorBitness")
 
 CONF_LANE_BIT_RATE = "lane_bit_rate"
 CONF_LANES = "lanes"
-CONF_POWER_I2C = "power_i2c" #//Patched
+CONF_POWER_I2C = "power_i2c"  # Patched
+
 DriverChip("CUSTOM")
 
 # Import all models dynamically from the models package
@@ -84,6 +85,14 @@ COLOR_DEPTHS = {
     16: ColorBitness.COLOR_BITNESS_565,
     24: ColorBitness.COLOR_BITNESS_888,
 }
+
+# Patched: MADCTL bit definitions (must match mipi_dsi.h)
+MADCTL_MY = 0x80
+MADCTL_MX = 0x40
+MADCTL_MV = 0x20
+MADCTL_BGR = 0x08
+MADCTL_XFLIP = 0x02
+MADCTL_YFLIP = 0x01
 
 
 def model_schema(config):
@@ -114,7 +123,7 @@ def model_schema(config):
         {
             model.option(CONF_RESET_PIN, cv.UNDEFINED): pins.gpio_output_pin_schema,
             cv.GenerateID(): cv.declare_id(MIPI_DSI),
-            cv.Optional(CONF_POWER_I2C): cv.use_id(i2c.I2CBus),  #//Patched
+            cv.Optional(CONF_POWER_I2C): cv.use_id(i2c.I2CBus),  # Patched
             cv_dimensions(CONF_DIMENSIONS): dimension_schema(
                 model.get_default(CONF_DRAW_ROUNDING, 1)
             ),
@@ -152,8 +161,6 @@ def model_schema(config):
             model.option(CONF_VSYNC_PULSE_WIDTH): cv.int_,
             model.option(CONF_VSYNC_BACK_PORCH): cv.int_,
             model.option(CONF_VSYNC_FRONT_PORCH): cv.int_,
-            
-
         }
     )
     return cv.All(
@@ -188,19 +195,43 @@ CONFIG_SCHEMA = _config_schema
 FINAL_VALIDATE_SCHEMA = _final_validate
 
 
+def _compute_madctl(config):
+    """Patched: Compute MADCTL byte from config for dump_config logging."""
+    madctl = 0
+    transform = config.get(CONF_TRANSFORM)
+    if isinstance(transform, dict):
+        use_axis_flips = config.get(CONF_USE_AXIS_FLIPS, True)
+        if transform.get(CONF_MIRROR_X, False):
+            madctl |= MADCTL_XFLIP if use_axis_flips else MADCTL_MX
+        if transform.get(CONF_MIRROR_Y, False):
+            madctl |= MADCTL_YFLIP if use_axis_flips else MADCTL_MY
+    # Check color order: compare against the BGR enum value
+    if config.get(CONF_COLOR_ORDER) == COLOR_ORDERS.get(MODE_BGR):
+        madctl |= MADCTL_BGR
+    return madctl
+
+
 async def to_code(config):
     model = MODELS[config[CONF_MODEL].upper()]
     color_depth = COLOR_DEPTHS[get_color_depth(config)]
     pixel_mode = int(config[CONF_PIXEL_MODE].removesuffix("bit"))
     width, height, _offset_width, _offset_height = model.get_dimensions(config)
     var = cg.new_Pvariable(config[CONF_ID], width, height, color_depth, pixel_mode)
+
+    # Patched: power_i2c support
     if CONF_POWER_I2C in config:
         bus = await cg.get_variable(config[CONF_POWER_I2C])
         cg.add(var.set_power_i2c_bus(bus))
-    sequence, madctl = model.get_sequence(config)
+
+    # Official 2026.4.0: get_sequence returns single value
+    sequence = model.get_sequence(config)
+
+    # Patched: compute madctl from config for dump_config
+    madctl = _compute_madctl(config)
+
     cg.add(var.set_model(config[CONF_MODEL]))
     cg.add(var.set_init_sequence(sequence))
-    cg.add(var.set_madctl(madctl))
+    cg.add(var.set_madctl(madctl))  # Patched
     cg.add(var.set_invert_colors(config[CONF_INVERT_COLORS]))
     cg.add(var.set_hsync_pulse_width(config[CONF_HSYNC_PULSE_WIDTH]))
     cg.add(var.set_hsync_back_porch(config[CONF_HSYNC_BACK_PORCH]))
