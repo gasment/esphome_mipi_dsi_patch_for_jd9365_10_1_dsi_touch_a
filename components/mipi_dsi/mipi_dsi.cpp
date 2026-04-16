@@ -2,7 +2,8 @@
 #include <utility>
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
-#include "esphome/components/i2c/i2c.h"   //Patched
+#include "esphome/components/i2c/i2c.h"  // Patched
+
 namespace esphome {
 namespace mipi_dsi {
 
@@ -22,9 +23,9 @@ void MIPI_DSI::smark_failed(const LogString *message, esp_err_t err) {
 }
 
 void MIPI_DSI::setup() {
-  ESP_LOGCONFIG(TAG, "Running Setup - with I2C Power Init");
+  ESP_LOGCONFIG(TAG, "Running Setup - with I2C Power Init");  // Patched
 
-///////////////////////Patch start
+  // Patched: I2C power init
   if (this->power_i2c_bus_ != nullptr) {
     uint8_t d1[2] = {0x95, 0x11};
     uint8_t d2[2] = {0x95, 0x17};
@@ -45,8 +46,7 @@ void MIPI_DSI::setup() {
   } else {
     ESP_LOGW(TAG, "Screen I2C Power bus not Funnd!");
   }
-////////////////////////Patch end
-
+  // Patched end
 
   if (!this->enable_pins_.empty()) {
     for (auto *pin : this->enable_pins_) {
@@ -78,6 +78,17 @@ void MIPI_DSI::setup() {
     this->smark_failed(LOG_STR("new_panel_io_dbi failed"), err);
     return;
   }
+  // clang-format off
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+  auto color_format = LCD_COLOR_FMT_RGB565;
+  if (this->color_depth_ == display::COLOR_BITNESS_888) {
+    color_format = LCD_COLOR_FMT_RGB888;
+  }
+  esp_lcd_dpi_panel_config_t dpi_config = {.virtual_channel = 0,
+                                           .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+                                           .dpi_clock_freq_mhz = this->pclk_frequency_,
+                                           .in_color_format = color_format,
+#else
   auto pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
   if (this->color_depth_ == display::COLOR_BITNESS_888) {
     pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
@@ -86,6 +97,7 @@ void MIPI_DSI::setup() {
                                            .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
                                            .dpi_clock_freq_mhz = this->pclk_frequency_,
                                            .pixel_format = pixel_format,
+#endif
                                            .num_fbs = 1,  // number of frame buffers to allocate
                                            .video_timing =
                                                {
@@ -99,13 +111,23 @@ void MIPI_DSI::setup() {
                                                    .vsync_front_porch = this->vsync_front_porch_,
                                                },
                                            .flags = {
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
                                                .use_dma2d = true,
+#endif
                                            }};
+  // clang-format on
   err = esp_lcd_new_panel_dpi(this->bus_handle_, &dpi_config, &this->handle_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+  err = esp_lcd_dpi_panel_enable_dma2d(this->handle_);
+  if (err != ESP_OK) {
+    this->smark_failed(LOG_STR("esp_lcd_dpi_panel_enable_dma2d failed"), err);
+    return;
+  }
+#endif
   if (this->reset_pin_ != nullptr) {
     this->reset_pin_->setup();
     this->reset_pin_->digital_write(true);
@@ -388,6 +410,7 @@ int MIPI_DSI::get_height() {
 
 static const uint8_t PIXEL_MODES[] = {0, 16, 18, 24};
 
+// Patched: enhanced dump_config with madctl info
 void MIPI_DSI::dump_config() {
   ESP_LOGCONFIG(TAG,
                 "MIPI_DSI RGB LCD"
