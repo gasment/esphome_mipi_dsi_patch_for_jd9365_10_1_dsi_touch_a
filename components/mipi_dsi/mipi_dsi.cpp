@@ -1,10 +1,11 @@
 #ifdef USE_ESP32_VARIANT_ESP32P4
 #include <utility>
-#include <cstring>
+#include <cstring>    // Dev: memcpy/memset
 #include "mipi_dsi.h"
 #include "esphome/core/helpers.h"
-#include "esphome/components/i2c/i2c.h"   //Patched
-#include <climits>
+#include "esphome/components/i2c/i2c.h"  // Patched: I2C power
+#include <climits>    // Dev: UINT32_MAX
+
 namespace esphome {
 namespace mipi_dsi {
 
@@ -23,7 +24,7 @@ void MIPI_DSI::smark_failed(const LogString *message, esp_err_t err) {
   this->mark_failed(message);
 }
 
-/////////////////////////////////////////////////patch
+/////////////////////////////////////////////////Dev: double-buffer dirty rect management
 void MIPI_DSI::reset_dirty_window_() {
   this->x_low_ = this->width_;
   this->y_low_ = this->height_;
@@ -69,7 +70,6 @@ void MIPI_DSI::merge_rect_into_list_(DirtyRect *rects, uint8_t &count, const Dir
 
   DirtyRect merged = input;
 
-  // 先把所有重叠/相邻 rect 吃进去
   bool merged_any = false;
   do {
     merged_any = false;
@@ -93,7 +93,6 @@ void MIPI_DSI::merge_rect_into_list_(DirtyRect *rects, uint8_t &count, const Dir
     return;
   }
 
-  // 满了：选一个“扩张代价最小”的 rect 强制合并
   uint8_t best_index = 0;
   uint32_t best_cost = UINT32_MAX;
 
@@ -108,7 +107,6 @@ void MIPI_DSI::merge_rect_into_list_(DirtyRect *rects, uint8_t &count, const Dir
 
   rects[best_index] = this->union_rect_(rects[best_index], merged);
 
-  // 强制合并后，可能又和其他 rect 接壤，再做一轮压缩
   bool collapsed = false;
   do {
     collapsed = false;
@@ -162,10 +160,6 @@ void MIPI_DSI::merge_rects_into_pending_(const DirtyRect *rects, uint8_t count) 
   }
 }
 
-
-
-
-
 void MIPI_DSI::copy_rect_to_buffer_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset,
                                     int y_offset, int x_pad) {
   if (w <= 0 || h <= 0)
@@ -193,7 +187,6 @@ void MIPI_DSI::copy_rect_to_buffer_(int x_start, int y_start, int w, int h, cons
   this->merge_pending_dirty_(x_start, y_start, x_start + w - 1, y_start + h - 1);
 }
 
-
 bool MIPI_DSI::start_present_() {
   if (!this->check_buffer_())
     return false;
@@ -213,7 +206,6 @@ bool MIPI_DSI::start_present_() {
 
   this->copy_dirty_rects_to_panel_fb_(next_fb, this->pending_rects_, this->pending_rect_count_);
 
-  // 清掉上一次可能残留的完成信号
   xSemaphoreTake(this->io_lock_, 0);
 
   esp_err_t err =
@@ -234,8 +226,6 @@ bool MIPI_DSI::start_present_() {
   return true;
 }
 
-
-
 void MIPI_DSI::service_present_queue_() {
   if (this->io_lock_ != nullptr && xSemaphoreTake(this->io_lock_, 0) == pdTRUE) {
     this->present_in_progress_ = false;
@@ -243,11 +233,8 @@ void MIPI_DSI::service_present_queue_() {
 
     if (this->inflight_rect_count_ > 0) {
       if (this->has_pending_dirty_()) {
-        // 已经有新 dirty 了，不必先回填 inactive fb；
-        // 直接把上一帧 rect 列表合并进 pending，下一次 present 一次性拷贝
         this->merge_rects_into_pending_(this->inflight_rects_, this->inflight_rect_count_);
       } else {
-        // 没有新 dirty，才把上一帧 rect 列表镜像回另一块 fb，保持双 fb 同步
         const uint8_t inactive_fb = this->active_panel_fb_ ^ 1;
         this->copy_dirty_rects_to_panel_fb_(inactive_fb, this->inflight_rects_, this->inflight_rect_count_);
       }
@@ -263,11 +250,6 @@ void MIPI_DSI::service_present_queue_() {
     }
   }
 }
-
-
-
-
-
 
 void MIPI_DSI::copy_dirty_rect_to_panel_fb_(uint8_t fb_index, int x1, int y1, int x2, int y2) {
   if (fb_index > 1 || this->panel_fbs_[fb_index] == nullptr)
@@ -292,19 +274,18 @@ void MIPI_DSI::copy_dirty_rect_to_panel_fb_(uint8_t fb_index, int x1, int y1, in
     dst += stride;
   }
 }
+
 void MIPI_DSI::copy_dirty_rects_to_panel_fb_(uint8_t fb_index, const DirtyRect *rects, uint8_t count) {
   for (uint8_t i = 0; i < count; i++) {
     this->copy_dirty_rect_to_panel_fb_(fb_index, rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2);
   }
 }
-/////////////////////////////////////////////////patch
-
-
+/////////////////////////////////////////////////Dev end
 
 void MIPI_DSI::setup() {
-  ESP_LOGCONFIG(TAG, "Running Setup - with I2C Power Init");
+  ESP_LOGCONFIG(TAG, "Running Setup - with I2C Power Init");  // Patched
 
-///////////////////////Patch start
+  // Patched: I2C power init
   if (this->power_i2c_bus_ != nullptr) {
     uint8_t d1[2] = {0x95, 0x11};
     uint8_t d2[2] = {0x95, 0x17};
@@ -325,8 +306,7 @@ void MIPI_DSI::setup() {
   } else {
     ESP_LOGW(TAG, "Screen I2C Power bus not Funnd!");
   }
-////////////////////////Patch end
-
+  // Patched end
 
   if (!this->enable_pins_.empty()) {
     for (auto *pin : this->enable_pins_) {
@@ -358,6 +338,17 @@ void MIPI_DSI::setup() {
     this->smark_failed(LOG_STR("new_panel_io_dbi failed"), err);
     return;
   }
+  // clang-format off
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+  auto color_format = LCD_COLOR_FMT_RGB565;
+  if (this->color_depth_ == display::COLOR_BITNESS_888) {
+    color_format = LCD_COLOR_FMT_RGB888;
+  }
+  esp_lcd_dpi_panel_config_t dpi_config = {.virtual_channel = 0,
+                                           .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
+                                           .dpi_clock_freq_mhz = this->pclk_frequency_,
+                                           .in_color_format = color_format,
+#else
   auto pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB565;
   if (this->color_depth_ == display::COLOR_BITNESS_888) {
     pixel_format = LCD_COLOR_PIXEL_FORMAT_RGB888;
@@ -366,7 +357,8 @@ void MIPI_DSI::setup() {
                                            .dpi_clk_src = MIPI_DSI_DPI_CLK_SRC_DEFAULT,
                                            .dpi_clock_freq_mhz = this->pclk_frequency_,
                                            .pixel_format = pixel_format,
-                                           .num_fbs = 2,  // number of frame buffers to allocate
+#endif
+                                           .num_fbs = 2,  // Dev: double-buffer (was 1 in official)
                                            .video_timing =
                                                {
                                                    .h_size = this->width_,
@@ -379,13 +371,23 @@ void MIPI_DSI::setup() {
                                                    .vsync_front_porch = this->vsync_front_porch_,
                                                },
                                            .flags = {
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(6, 0, 0)
                                                .use_dma2d = true,
+#endif
                                            }};
+  // clang-format on
   err = esp_lcd_new_panel_dpi(this->bus_handle_, &dpi_config, &this->handle_);
   if (err != ESP_OK) {
     this->smark_failed(LOG_STR("esp_lcd_new_panel_dpi failed"), err);
     return;
   }
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 0, 0)
+  err = esp_lcd_dpi_panel_enable_dma2d(this->handle_);
+  if (err != ESP_OK) {
+    this->smark_failed(LOG_STR("esp_lcd_dpi_panel_enable_dma2d failed"), err);
+    return;
+  }
+#endif
   if (this->reset_pin_ != nullptr) {
     this->reset_pin_->setup();
     this->reset_pin_->digital_write(true);
@@ -445,8 +447,7 @@ void MIPI_DSI::setup() {
     }
   }
 
-
-
+  // Dev: double-buffer initialization
   this->io_lock_ = xSemaphoreCreateBinary();
   this->frame_buffer_size_ = static_cast<size_t>(this->width_) * this->height_ * (3 - this->color_depth_);
   this->queued_panel_fb_ = 0;
@@ -455,7 +456,6 @@ void MIPI_DSI::setup() {
   this->reset_dirty_window_();
   this->reset_pending_dirty_();
   this->reset_inflight_dirty_();
-
 
   void *fb0 = nullptr;
   void *fb1 = nullptr;
@@ -474,6 +474,7 @@ void MIPI_DSI::setup() {
   memset(this->panel_fbs_[0], 0, this->frame_buffer_size_);
   memset(this->panel_fbs_[1], 0, this->frame_buffer_size_);
 
+  // Dev: use on_refresh_done for double-buffer tear-free (not on_color_trans_done)
   esp_lcd_dpi_panel_event_callbacks_t cbs = {
       .on_refresh_done = notify_refresh_ready,
   };
@@ -490,7 +491,6 @@ void MIPI_DSI::setup() {
 void MIPI_DSI::loop() {
   this->service_present_queue_();
 }
-
 
 void MIPI_DSI::update() {
   if (this->auto_clear_enabled_) {
@@ -511,10 +511,8 @@ void MIPI_DSI::update() {
 
   this->merge_pending_dirty_(this->x_low_, this->y_low_, this->x_high_, this->y_high_);
   this->present_pending_ = true;
-  //this->service_present_queue_();
   this->reset_dirty_window_();
 }
-
 
 void MIPI_DSI::draw_pixels_at(int x_start, int y_start, int w, int h, const uint8_t *ptr, display::ColorOrder order,
                               display::ColorBitness bitness, bool big_endian, int x_offset, int y_offset, int x_pad) {
@@ -530,11 +528,9 @@ void MIPI_DSI::draw_pixels_at(int x_start, int y_start, int w, int h, const uint
   this->write_to_display_(x_start, y_start, w, h, ptr, x_offset, y_offset, x_pad);
 }
 
-
-
-
-void MIPI_DSI::write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset, int y_offset,
-                                 int x_pad) {
+// Dev: rewritten for double-buffer — writes to shadow buffer + marks dirty
+void MIPI_DSI::write_to_display_(int x_start, int y_start, int w, int h, const uint8_t *ptr, int x_offset,
+                                 int y_offset, int x_pad) {
   if (w <= 0 || h <= 0)
     return;
 
@@ -546,10 +542,6 @@ void MIPI_DSI::write_to_display_(int x_start, int y_start, int w, int h, const u
 
   this->present_pending_ = true;
 }
-
-
-
-
 
 bool MIPI_DSI::check_buffer_() {
   if (this->is_failed())
@@ -565,13 +557,13 @@ bool MIPI_DSI::check_buffer_() {
     return false;
   }
 
+  // Dev: zero-init and reset dirty tracking
   memset(this->buffer_, 0, this->height_ * this->width_ * bytes_per_pixel);
   this->reset_dirty_window_();
   this->reset_pending_dirty_();
   this->reset_inflight_dirty_();
   return true;
 }
-
 
 void MIPI_DSI::draw_pixel_at(int x, int y, Color color) {
   if (!this->get_clipping().inside(x, y))
@@ -634,6 +626,7 @@ void MIPI_DSI::draw_pixel_at(int x, int y, Color color) {
   if (y > this->y_high_)
     this->y_high_ = y;
 }
+
 void MIPI_DSI::fill(Color color) {
   if (!this->check_buffer_())
     return;
@@ -672,6 +665,7 @@ void MIPI_DSI::fill(Color color) {
     default:
       break;
   }
+  // Dev: mark entire screen dirty
   this->x_low_ = 0;
   this->y_low_ = 0;
   this->x_high_ = this->width_ - 1;
