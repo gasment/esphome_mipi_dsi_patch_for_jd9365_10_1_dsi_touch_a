@@ -24,6 +24,21 @@ void MIPI_DSI::smark_failed(const LogString *message, esp_err_t err) {
   this->mark_failed(message);
 }
 
+esp_err_t MIPI_DSI::set_display_enabled(bool enabled) {
+  if (this->io_handle_ == nullptr) {
+    ESP_LOGE(TAG, "Cannot send DCS display command before panel IO is initialized");
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  const uint8_t command = enabled ? DISPLAY_ON : DISPLAY_OFF;
+  const esp_err_t err = esp_lcd_panel_io_tx_param(this->io_handle_, command, nullptr, 0);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "DCS display %s command (0x%02X) failed: %s", enabled ? "on" : "off", command,
+             esp_err_to_name(err));
+  }
+  return err;
+}
+
 /////////////////////////////////////////////////Dev: double-buffer dirty rect management
 void MIPI_DSI::reset_dirty_window_() {
   this->x_low_ = this->width_;
