@@ -32,6 +32,7 @@ const uint8_t MADCTL_CMD = 0x36;
 const uint8_t INVERT_OFF = 0x20;
 const uint8_t INVERT_ON = 0x21;
 const uint8_t DISPLAY_ON = 0x29;
+const uint8_t DISPLAY_OFF = 0x28;
 const uint8_t CMD2_BKSEL = 0xFF;
 const uint8_t DELAY_FLAG = 0xFF;
 const uint8_t MADCTL_BGR = 0x08;
@@ -69,6 +70,9 @@ class MIPI_DSI : public display::Display {
   void set_madctl(uint8_t madctl) { this->madctl_ = madctl; }
 
   void set_power_i2c_bus(i2c::I2CBus *bus) { this->power_i2c_bus_ = bus; }  // Patched: I2C power
+
+  // Send the JD9365 DCS display on/off command through the DBI command channel.
+  esp_err_t set_display_enabled(bool enabled);
 
   void smark_failed(const LogString *message, esp_err_t err);
 
