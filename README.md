@@ -97,3 +97,10 @@ external_components:
       CONFIG_CACHE_L2_CACHE_256KB: "y"
       CONFIG_CACHE_L2_CACHE_LINE_64B: "y"
   ```
+dev分支另外支持开关面板输出（非背光）的DCS命令接口
+使用lambda在自动化中调用：
+```
+- lambda: |-
+       id(your_display_id).set_display_enabled(true);    //开启
+       id(your_display_id).set_display_enabled(false);    //关闭
+```
